@@ -22,6 +22,9 @@ const SECRET = process.env.JWT_SECRET;
 if (!SECRET || SECRET.length < 32) { console.error('JWT_SECRET missing or too short'); process.exit(1); }
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 10 });
 const ACCESS_TTL = 60 * 60;            // 1 hour
+// Google sign-in: the OAuth "Web client ID" (or several, comma separated). Empty = Google sign-in switched off.
+const GOOGLE_IDS = String(process.env.GOOGLE_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID || '').split(',').map((x) => x.trim()).filter(Boolean);
+const GOOGLE_CERTS = process.env.GOOGLE_CERTS_URL || 'https://www.googleapis.com/oauth2/v3/certs';
 const REFRESH_TTL = 60 * 24 * 3600;    // 60 days
 
 /* ---------- tokens (HS256 JWT) ---------- */
@@ -39,12 +42,43 @@ function verifyJwt(t) {
   try { const p = JSON.parse(Buffer.from(parts[1], 'base64url')); return p.exp > Date.now() / 1000 ? p : null; } catch { return null; }
 }
 const sha = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
+/* ---------- Google ID tokens (RS256, checked against Google's published keys) ---------- */
+let gKeys = { at: 0, ttl: 0, keys: {} };
+async function googleKeys(force) {
+  if (!force && Date.now() - gKeys.at < gKeys.ttl) return gKeys.keys;
+  const r = await fetch(GOOGLE_CERTS);
+  if (!r.ok) throw new Error('google keys ' + r.status);
+  const age = +((r.headers.get('cache-control') || '').match(/max-age=(\d+)/) || [])[1] || 3600;
+  const keys = {};
+  for (const k of (await r.json()).keys || []) keys[k.kid] = crypto.createPublicKey({ key: k, format: 'jwk' });
+  gKeys = { at: Date.now(), ttl: Math.min(age, 24 * 3600) * 1000, keys };
+  return keys;
+}
+async function verifyGoogle(idToken) {
+  if (!GOOGLE_IDS.length) throw new Error('google_off');
+  const parts = String(idToken || '').split('.');
+  if (parts.length !== 3) throw new Error('google_bad');
+  let h, p;
+  try { h = JSON.parse(Buffer.from(parts[0], 'base64url')); p = JSON.parse(Buffer.from(parts[1], 'base64url')); } catch { throw new Error('google_bad'); }
+  if (h.alg !== 'RS256') throw new Error('google_bad');
+  let key = (await googleKeys())[h.kid];
+  if (!key) key = (await googleKeys(true))[h.kid];          // Google rotates keys now and then
+  if (!key) throw new Error('google_bad');
+  const ok = crypto.verify('RSA-SHA256', Buffer.from(parts[0] + '.' + parts[1]), key, Buffer.from(parts[2], 'base64url'));
+  const now = Date.now() / 1000;
+  if (!ok || !['accounts.google.com', 'https://accounts.google.com'].includes(p.iss) || !GOOGLE_IDS.includes(p.aud)
+      || !(p.exp > now - 60) || !p.sub || !p.email || !(p.email_verified === true || p.email_verified === 'true')) throw new Error('google_bad');
+  return { sub: String(p.sub), email: String(p.email).toLowerCase(), name: String(p.name || p.given_name || p.email.split('@')[0]).trim().slice(0, 20) };
+}
+const GUEST_NAMES = ['عدّاء', 'ماشي', 'رحّال', 'نشيط', 'سبّاق'];
+const guestName = () => GUEST_NAMES[crypto.randomInt(GUEST_NAMES.length)] + ' ' + crypto.randomInt(1000, 10000);
 async function issue(userId) {
   const now = Math.floor(Date.now() / 1000);
   const access = signJwt({ sub: userId, iat: now, exp: now + ACCESS_TTL });
   const refresh = crypto.randomBytes(32).toString('base64url');
   await pool.query('insert into auth.refresh_tokens (token_hash, user_id, expires_at) values ($1, $2, now() + make_interval(secs => $3))', [sha(refresh), userId, REFRESH_TTL]);
-  const u = await pool.query('select id, email, raw_user_meta_data as user_metadata from auth.users where id = $1', [userId]);
+  const u = await pool.query("select id, case when is_guest then '' else email end as email, raw_user_meta_data as user_metadata, is_guest, google_sub is not null as google from auth.users where id = $1", [userId]);
   return { access_token: access, refresh_token: refresh, expires_at: now + ACCESS_TTL, user: u.rows[0] };
 }
 
@@ -64,12 +98,12 @@ async function asUser(uid, sql, args) {
 
 /* ---------- simple per-IP rate limit for account endpoints ---------- */
 const hits = new Map();
-function limited(ip, max) {
+function limited(ip, max, win = 60000) {
   const now = Date.now(), w = hits.get(ip) || [];
-  const recent = w.filter((t) => now - t < 60000); recent.push(now); hits.set(ip, recent);
+  const recent = w.filter((t) => now - t < win); recent.push(now); hits.set(ip, recent);
   return recent.length > max;
 }
-setInterval(() => { const now = Date.now(); for (const [k, v] of hits) if (!v.some((t) => now - t < 60000)) hits.delete(k); }, 60000).unref();
+setInterval(() => { const now = Date.now(); for (const [k, v] of hits) if (!v.some((t) => now - t < 3600e3)) hits.delete(k); }, 60000).unref();
 
 /* ---------- http ---------- */
 function send(res, code, obj) {
@@ -150,6 +184,29 @@ const server = http.createServer(async (req, res) => {
         const r = await pool.query('select auth.sign_in($1, $2) as id', [b.email, b.password]);
         return send(res, 200, await issue(r.rows[0].id));
       }
+      if (path === '/auth/guest') {
+        if (limited('guest:' + ip, 10, 3600e3)) return send(res, 429, { error: 'Too many requests, rate limit' });
+        const r = await pool.query('select auth.guest($1) as id', [guestName()]);
+        return send(res, 200, await issue(r.rows[0].id));
+      }
+      if (path === '/auth/google') {
+        const g = await verifyGoogle(b.id_token);
+        const r = await pool.query('select auth.google($1, $2, $3) as v', [g.sub, g.email, g.name.length >= 2 ? g.name : 'لاعب']);
+        return send(res, 200, Object.assign(await issue(r.rows[0].v.id), { created: r.rows[0].v.created }));
+      }
+      if (path === '/auth/upgrade') {
+        const t = verifyJwt((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
+        if (!t) return send(res, 401, { error: 'JWT expired or invalid' });
+        if (b.id_token) {
+          const g = await verifyGoogle(b.id_token);
+          await pool.query('select auth.upgrade_google($1, $2, $3)', [t.sub, g.sub, g.email]);
+        } else {
+          if (!emailOk(b.email)) return send(res, 400, { error: 'Unable to validate email address: invalid format' });
+          if (typeof b.password !== 'string' || b.password.length < 8 || b.password.length > 72) return send(res, 400, { error: 'Password should be at least 8 characters' });
+          await pool.query('select auth.upgrade_email($1, $2, $3)', [t.sub, b.email, b.password]);
+        }
+        return send(res, 200, await issue(t.sub));
+      }
       if (path === '/auth/refresh') {
         const h = sha(String(b.refresh_token || ''));
         const r = await pool.query('delete from auth.refresh_tokens where token_hash = $1 and expires_at > now() returning user_id', [h]);
@@ -188,11 +245,15 @@ const server = http.createServer(async (req, res) => {
     return send(res, 404, { error: 'not found' });
   } catch (e) {
     const m = String(e.message || e);
-    if (/User already registered|Invalid login credentials/.test(m)) return send(res, 400, { error: m.match(/User already registered|Invalid login credentials/)[0] });
+    if (/User already registered|Invalid login credentials|google_taken|google_bad|google_off|not a guest/.test(m)) return send(res, 400, { error: m.match(/User already registered|Invalid login credentials|google_taken|google_bad|google_off|not a guest/)[0] });
     if (/not signed in|bad workout|unknown|violates|invalid input/.test(m)) return send(res, 400, { error: m });
     console.error(new Date().toISOString(), path, m);
     return send(res, 500, { error: 'Server error' });
   }
 });
 server.listen(PORT, '127.0.0.1', () => console.log('Maydan API listening on 127.0.0.1:' + PORT));
-setInterval(() => pool.query('delete from auth.refresh_tokens where expires_at < now()').catch(() => {}), 6 * 3600e3).unref();
+setInterval(() => {
+  pool.query('delete from auth.refresh_tokens where expires_at < now()').catch(() => {});
+  // guests who never trained and have not opened the app for 30 days
+  pool.query('select auth.cleanup_guests()').catch(() => {});
+}, 6 * 3600e3).unref();

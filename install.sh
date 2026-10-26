@@ -65,8 +65,8 @@ systemctl enable --now postgresql >/dev/null 2>&1 || true
 $PSQL -tc "select 1 from pg_roles where rolname='maydan'" | grep -q 1 || $PSQL -c "create role maydan login password '${DBPASS}'"
 $PSQL -tc "select 1 from pg_database where datname='maydan'" | grep -q 1 || $PSQL -c "create database maydan"
 $PSQL -c "do \$\$ begin if not exists (select 1 from pg_roles where rolname='authenticated') then create role authenticated nologin; end if; if not exists (select 1 from pg_roles where rolname='anon') then create role anon nologin; end if; end \$\$;" -c "grant authenticated to maydan"
-for f in 01-auth.sql 02-schema.sql 03-grants.sql 04-social.sql 05-challenges.sql; do $PSQL -d maydan -f "$APP/sql/$f" 2>&1 | grep -v "NOTICE\|already exists\|does not exist, skipping" || true; done
-$PSQL -d maydan -c "grant usage on schema auth to maydan; grant execute on function auth.sign_up(text,text,text), auth.sign_in(text,text) to maydan; grant select, insert, delete on auth.refresh_tokens to maydan; grant select on auth.users to maydan;"
+for f in 01-auth.sql 02-schema.sql 03-grants.sql 04-social.sql 05-challenges.sql 06-accounts.sql; do $PSQL -d maydan -f "$APP/sql/$f" 2>&1 | grep -v "NOTICE\|already exists\|does not exist, skipping" || true; done
+$PSQL -d maydan -c "grant usage on schema auth to maydan; grant execute on function auth.sign_up(text,text,text), auth.sign_in(text,text) to maydan; grant execute on function auth.guest(text), auth.google(text,text,text), auth.upgrade_email(uuid,text,text), auth.upgrade_google(uuid,text,text), auth.cleanup_guests() to maydan; grant select, insert, delete on auth.refresh_tokens to maydan; grant select on auth.users to maydan;"
 
 step "6/7 تشغيل الخادم"
 cat > /etc/systemd/system/maydan.service <<EOF
