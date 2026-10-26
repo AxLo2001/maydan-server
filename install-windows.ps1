@@ -90,12 +90,21 @@ Pop-Location
 Step '4/8 PostgreSQL database'
 $psql = Get-ChildItem 'C:\Program Files\PostgreSQL\*\bin\psql.exe' -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
 if (-not $psql) {
-  Info 'installing PostgreSQL 16 (a few minutes)...'
-  if (-not (Get-Command choco.exe -ErrorAction SilentlyContinue)) {
-    Invoke-Expression ((New-Object Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-    $env:Path = "$env:Path;$env:ALLUSERSPROFILE\chocolatey\bin"
+  Info 'downloading PostgreSQL 16 from EnterpriseDB (about 350 MB)...'
+  $pgExe = Join-Path $env:TEMP 'postgresql-16-windows-x64.exe'
+  $got = $false
+  foreach ($v in @('16.15-5', '16.15-4', '16.15-3', '16.15-2', '16.15-1', '16.14-1', '16.13-1', '16.12-1')) {
+    try {
+      Invoke-WebRequest -Uri "https://get.enterprisedb.com/postgresql/postgresql-$v-windows-x64.exe" -OutFile $pgExe -UseBasicParsing
+      if ((Get-Item $pgExe).Length -gt 100MB) { Info "got PostgreSQL $v"; $got = $true; break }
+    } catch { }
   }
-  RunNative 'choco.exe' @('install', 'postgresql16', '-y', '--no-progress', '--params', "/Password:$($E.PGSUPER) /Port:5432", '--ia', '--enable-components server,commandlinetools')
+  if (-not $got) { Fail 'Could not download PostgreSQL. Check the internet connection of the server and run again.' }
+  Info 'installing PostgreSQL (5 to 10 minutes, no output while it works)...'
+  $pgArgs = @('--mode', 'unattended', '--unattendedmodeui', 'none', '--superpassword', $E.PGSUPER, '--serverport', '5432', '--enable-components', 'server,commandlinetools')
+  $proc = Start-Process -FilePath $pgExe -ArgumentList $pgArgs -Wait -PassThru
+  if ($proc.ExitCode -ne 0) { Fail "PostgreSQL installer failed (exit $($proc.ExitCode)). Send this to Claude." }
+  Remove-Item $pgExe -Force -ErrorAction SilentlyContinue
   $psql = Get-ChildItem 'C:\Program Files\PostgreSQL\*\bin\psql.exe' -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
   if (-not $psql) { Fail 'PostgreSQL did not install. Send the messages above to Claude.' }
 }
