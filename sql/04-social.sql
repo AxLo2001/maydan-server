@@ -1,5 +1,9 @@
 -- Maydan Al Hayy: invites, activity events and badge stats. Safe to run again.
 
+-- ============ steps and calories per workout ============
+alter table public.workouts add column if not exists steps integer not null default 0;
+alter table public.workouts add column if not exists kcal integer not null default 0;
+
 -- ============ invite codes ============
 alter table public.profiles add column if not exists invite_code text;
 alter table public.profiles add column if not exists invited_by uuid references auth.users on delete set null;
@@ -53,6 +57,8 @@ declare
   v_secs integer := greatest(0, least(86400, coalesce((p->>'secs')::numeric, 0)::integer));
   v_km numeric := greatest(0, least(100, coalesce((p->>'km')::numeric, 0)));
   v_start timestamptz := coalesce((p->>'started_at')::timestamptz, now());
+  v_steps integer := greatest(0, coalesce((p->>'steps')::numeric, 0)::integer);
+  v_kcal integer := greatest(0, coalesce((p->>'kcal')::numeric, 0)::integer);
   v_streak integer; v_mult numeric; v_base integer; v_pts integer;
   v_new integer := 0; v_steal integer := 0; v_max_cells integer;
   v_victims jsonb := '{}'::jsonb; v_key text; v_inviter uuid; v_bonus integer := 0;
@@ -68,6 +74,8 @@ begin
 
   if v_secs > 0 and v_km * 1000 / v_secs > 7 then v_km := round(v_secs * 7 / 1000.0, 3); end if;
   if v_secs = 0 then v_km := 0; end if;
+  v_steps := least(v_steps, v_secs * 4);                      -- nobody takes more than 4 steps a second
+  v_kcal := least(v_kcal, ceil(v_km * 200)::integer, 5000);
 
   v_streak := public.streak_for(uid);
   v_mult := 1 + least(v_streak, 10) * 0.05;
@@ -89,8 +97,8 @@ begin
 
   v_pts := v_base + v_new * 5 + v_steal * 8;
 
-  insert into public.workouts (user_id, client_id, started_at, day, mode, km, secs, pts, new_cells, steals)
-  values (uid, v_client, v_start, (v_start at time zone 'Asia/Riyadh')::date, v_mode, v_km, v_secs, v_pts, v_new, v_steal);
+  insert into public.workouts (user_id, client_id, started_at, day, mode, km, secs, pts, new_cells, steals, steps, kcal)
+  values (uid, v_client, v_start, (v_start at time zone 'Asia/Riyadh')::date, v_mode, v_km, v_secs, v_pts, v_new, v_steal, v_steps, v_kcal);
   if v_pts > 0 then
     insert into public.points (user_id, amount, reason) values (uid, v_pts, 'workout:' || v_client);
   end if;
@@ -158,13 +166,16 @@ begin
   select jsonb_build_object(
     'name', (select name from public.profiles where id = uid),
     'invite_code', (select invite_code from public.profiles where id = uid),
-    'today', (select jsonb_build_object('km', coalesce(sum(km), 0), 'new_cells', coalesce(sum(new_cells), 0), 'steals', coalesce(sum(steals), 0))
+    'today', (select jsonb_build_object('km', coalesce(sum(km), 0), 'new_cells', coalesce(sum(new_cells), 0), 'steals', coalesce(sum(steals), 0), 'steps', coalesce(sum(steps), 0), 'kcal', coalesce(sum(kcal), 0))
               from public.workouts where user_id = uid and day = d),
     'today_pts', (select coalesce(sum(amount), 0) from public.points where user_id = uid and (created_at at time zone 'Asia/Riyadh')::date = d),
     'week_pts', (select coalesce(sum(amount), 0) from public.points where user_id = uid and created_at >= public.week_start()),
     'streak', public.streak_for(uid),
     'best_streak', public.best_streak_for(uid),
     'total_km', (select coalesce(sum(km), 0) from public.workouts where user_id = uid),
+    'total_steps', (select coalesce(sum(steps), 0) from public.workouts where user_id = uid),
+    'total_kcal', (select coalesce(sum(kcal), 0) from public.workouts where user_id = uid),
+    'most_steps', (select coalesce(max(steps), 0) from public.workouts where user_id = uid),
     'longest_km', (select coalesce(max(km), 0) from public.workouts where user_id = uid),
     'workouts', (select count(*) from public.workouts where user_id = uid),
     'runs', (select count(*) from public.workouts where user_id = uid and mode = 'run'),
