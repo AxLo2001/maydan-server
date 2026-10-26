@@ -7,6 +7,16 @@ const http = require('http');
 const crypto = require('crypto');
 const { Pool } = require('pg');
 
+// optional settings file (used on Windows): KEY=VALUE lines in ../maydan.env or ENV_FILE
+(() => {
+  const fs = require('fs'), path = require('path');
+  const f = process.env.ENV_FILE || path.join(__dirname, '..', 'maydan.env');
+  if (!fs.existsSync(f)) return;
+  for (const line of fs.readFileSync(f, 'utf8').split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2];
+  }
+})();
 const PORT = +process.env.PORT || 3000;
 const SECRET = process.env.JWT_SECRET;
 if (!SECRET || SECRET.length < 32) { console.error('JWT_SECRET missing or too short'); process.exit(1); }
