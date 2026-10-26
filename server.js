@@ -92,7 +92,36 @@ const RPC = {
   weekly_board: { sql: 'select rank::int as rank, name, pts::int as pts, is_me from public.weekly_board()', args: () => [] },
   cells_in_view: { sql: 'select * from public.cells_in_view($1, $2, $3, $4)', args: (a) => [+a.s, +a.w, +a.n, +a.e] },
   delete_my_account: { sql: 'select public.delete_my_account()', args: () => [], none: true },
+  redeem_invite: { sql: 'select public.redeem_invite($1) as v', args: (a) => [String(a.p_code || '').slice(0, 12)], one: true },
+  my_events: { sql: 'select * from public.my_events()', args: () => [] },
 };
+
+/* ---------- invite landing page: https://<server>/i/CODE ---------- */
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+async function invitePage(res, code) {
+  const r = await pool.query('select name from public.profiles where invite_code = $1', [code]);
+  const name = r.rows[0] ? r.rows[0].name : null;
+  const dl = process.env.DOWNLOAD_URL || '';
+  const html = `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ميدان الحي</title><meta property="og:title" content="${name ? esc(name) + ' يتحداك في ميدان الحي' : 'ميدان الحي'}">
+<meta property="og:description" content="امش واجر في حيك، واحتل شوارعه، ونافس جيرانك كل أسبوع.">
+<style>body{margin:0;min-height:100vh;background:#0A0E10;color:#F2F6F4;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
+.c{max-width:380px;width:100%;text-align:center;display:flex;flex-direction:column;gap:18px;align-items:center}
+.logo{width:76px;height:76px;border-radius:22px;background:linear-gradient(150deg,#B6F3DA,#5FCFA4);color:#06110D;font-weight:800;font-size:34px;display:flex;align-items:center;justify-content:center}
+h1{margin:0;font-size:28px;line-height:1.35}p{margin:0;color:#BCC8C5;line-height:1.7}
+.code{font-size:30px;font-weight:800;letter-spacing:6px;background:#1A2327;border-radius:16px;padding:14px 22px;direction:ltr}
+a.b{display:block;width:100%;height:54px;line-height:54px;border-radius:16px;font-weight:700;text-decoration:none;box-sizing:border-box}
+.p{background:#8EE3C1;color:#06110D}.g{background:#1A2327;color:#F2F6F4}.s{font-size:13px;color:#8C9C9A}</style></head>
+<body><main class="c"><div class="logo">حي</div>
+<h1>${name ? esc(name) + ' يتحداك في<br>ميدان الحي' : 'ميدان الحي'}</h1>
+<p>امش واجر في حيك، واحتل شوارعه خلية خلية، ونافس جيرانك على صدارة الأسبوع.</p>
+${name ? `<p class="s">كود الدعوة</p><div class="code">${esc(code)}</div><p class="s">اكتبه وقت التسجيل، وتاخذون أنت و${esc(name)} 100 نقطة أول ما تمشي كيلو.</p>` : '<p class="s">رابط الدعوة غير صحيح.</p>'}
+<a class="b p" href="maydan://invite/${esc(code)}">افتح في التطبيق</a>
+${dl ? `<a class="b g" href="${esc(dl)}">حمّل التطبيق</a>` : '<p class="s">التطبيق قريباً على Google Play.</p>'}
+</main></body></html>`;
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(html);
+}
 
 const server = http.createServer(async (req, res) => {
   const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
@@ -101,6 +130,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   try {
     if (path === '/health') { await pool.query('select 1'); return send(res, 200, { ok: true }); }
+    if (req.method === 'GET' && /^\/i\/[A-Za-z0-9]{4,12}$/.test(path)) return invitePage(res, path.slice(3).toUpperCase());
 
     /* accounts */
     if (path.startsWith('/auth/')) {
