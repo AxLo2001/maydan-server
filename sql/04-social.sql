@@ -75,6 +75,7 @@ begin
   if v_secs > 0 and v_km * 1000 / v_secs > 7 then v_km := round(v_secs * 7 / 1000.0, 3); end if;
   if v_secs = 0 then v_km := 0; end if;
   v_steps := least(v_steps, v_secs * 4);                      -- nobody takes more than 4 steps a second
+  v_steps := least(v_steps, ceil(v_km * 2000)::integer + 300); -- and steps must match the GPS distance (shaking the phone does not count)
   v_kcal := least(v_kcal, ceil(v_km * 200)::integer, 5000);
 
   v_streak := public.streak_for(uid);
@@ -165,6 +166,7 @@ begin
   ws := (public.week_start() at time zone 'Asia/Riyadh')::date;
   select jsonb_build_object(
     'name', (select name from public.profiles where id = uid),
+    'challenge', case when to_regprocedure('public.challenge_state(uuid)') is not null then public.challenge_state(uid) end,
     'invite_code', (select invite_code from public.profiles where id = uid),
     'today', (select jsonb_build_object('km', coalesce(sum(km), 0), 'new_cells', coalesce(sum(new_cells), 0), 'steals', coalesce(sum(steals), 0), 'steps', coalesce(sum(steps), 0), 'kcal', coalesce(sum(kcal), 0))
               from public.workouts where user_id = uid and day = d),
