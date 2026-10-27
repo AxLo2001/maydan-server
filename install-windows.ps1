@@ -148,7 +148,7 @@ $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
 $hasDb = (& $psql @base -tAc "select 1 from pg_database where datname = 'maydan'") 2>$null
 $ErrorActionPreference = $old
 if ("$hasDb".Trim() -ne '1') { RunNative $psql ($base + @('-c', 'create database maydan')) }
-foreach ($f in @('01-auth.sql', '02-schema.sql', '03-grants.sql', '04-social.sql', '05-challenges.sql', '06-accounts.sql')) { RunNative $psql ($base + @('-d', 'maydan', '-f', (Join-Path $App "sql\$f"))) }
+foreach ($f in @('01-auth.sql', '02-schema.sql', '03-grants.sql', '04-social.sql', '05-challenges.sql', '06-accounts.sql', '07-seasons.sql', '08-report.sql', '09-push.sql')) { RunNative $psql ($base + @('-d', 'maydan', '-f', (Join-Path $App "sql\$f"))) }
 RunNative $psql ($base + @('-d', 'maydan', '-c', 'grant usage on schema auth to maydan; grant execute on function auth.sign_up(text,text,text), auth.sign_in(text,text) to maydan; grant execute on function auth.guest(text), auth.google(text,text,text), auth.upgrade_email(uuid,text,text), auth.upgrade_google(uuid,text,text), auth.cleanup_guests() to maydan; grant select, insert, delete on auth.refresh_tokens to maydan; grant select on auth.users to maydan;'))
 Remove-Item Env:\PGPASSWORD, Env:\PGOPTIONS -ErrorAction SilentlyContinue
 

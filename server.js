@@ -128,7 +128,22 @@ const RPC = {
   delete_my_account: { sql: 'select public.delete_my_account()', args: () => [], none: true },
   redeem_invite: { sql: 'select public.redeem_invite($1) as v', args: (a) => [String(a.p_code || '').slice(0, 12)], one: true },
   my_events: { sql: 'select * from public.my_events()', args: () => [] },
+  weekly_report: { sql: 'select public.weekly_report() as v', args: () => [], one: true },
+  save_push_token: { sql: 'select public.save_push_token($1)', args: (a) => [String(a.p_token || '')], none: true },
+  delete_push_token: { sql: 'select public.delete_push_token($1)', args: (a) => [String(a.p_token || '')], none: true },
+  season_board: { sql: 'select rank::int as rank, name, pts::int as pts, is_me from public.season_board()', args: () => [] },
 };
+
+/* ---------- privacy policy: https://<server>/privacy (Google Play and Health Connect link here) ---------- */
+let privacyHtml = null;
+function privacyPage(res) {
+  if (!privacyHtml) {
+    const c = process.env.CONTACT_EMAIL ? '<a href="mailto:' + process.env.CONTACT_EMAIL + '">' + process.env.CONTACT_EMAIL + '</a>' : 'من داخل التطبيق: حسابي';
+    privacyHtml = require('fs').readFileSync(require('path').join(__dirname, 'privacy.html'), 'utf8').split('__CONTACT__').join(c);
+  }
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
+  res.end(privacyHtml);
+}
 
 /* ---------- invite landing page: https://<server>/i/CODE ---------- */
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -165,6 +180,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (path === '/health') { await pool.query('select 1'); return send(res, 200, { ok: true }); }
     if (req.method === 'GET' && /^\/i\/[A-Za-z0-9]{4,12}$/.test(path)) return invitePage(res, path.slice(3).toUpperCase());
+    if (req.method === 'GET' && (path === '/privacy' || path === '/privacy/')) return privacyPage(res);
 
     /* accounts */
     if (path.startsWith('/auth/')) {
@@ -246,12 +262,15 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     const m = String(e.message || e);
     if (/User already registered|Invalid login credentials|google_taken|google_bad|google_off|not a guest/.test(m)) return send(res, 400, { error: m.match(/User already registered|Invalid login credentials|google_taken|google_bad|google_off|not a guest/)[0] });
-    if (/not signed in|bad workout|unknown|violates|invalid input/.test(m)) return send(res, 400, { error: m });
+    if (/not signed in|bad workout|bad token|unknown|violates|invalid input/.test(m)) return send(res, 400, { error: m });
     console.error(new Date().toISOString(), path, m);
     return send(res, 500, { error: 'Server error' });
   }
 });
 server.listen(PORT, '127.0.0.1', () => console.log('Maydan API listening on 127.0.0.1:' + PORT));
+require('./push')(pool, process.env.DATABASE_URL);
+// a new month closes the season even if nobody trains at midnight
+setInterval(() => pool.query('select public.season_tick()').catch(() => {}), 10 * 60e3).unref();
 setInterval(() => {
   pool.query('delete from auth.refresh_tokens where expires_at < now()').catch(() => {});
   // guests who never trained and have not opened the app for 30 days

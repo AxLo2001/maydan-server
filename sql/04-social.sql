@@ -84,6 +84,7 @@ declare
 begin
   if uid is null then raise exception 'not signed in'; end if;
   if v_client is null or v_mode not in ('walk', 'run') then raise exception 'bad workout'; end if;
+  if to_regprocedure('public.season_tick()') is not null then perform public.season_tick(); end if;  -- a new month closes the old season first
 
   select * into existing from public.workouts where user_id = uid and client_id = v_client;
   if found then
@@ -193,6 +194,7 @@ begin
   select jsonb_build_object(
     'name', (select name from public.profiles where id = uid),
     'challenge', case when to_regprocedure('public.challenge_state(uuid)') is not null then public.challenge_state(uid) end,
+    'season', case when to_regprocedure('public.season_state(uuid)') is not null then public.season_state(uid) end,
     'invite_code', (select invite_code from public.profiles where id = uid),
     'today', (select jsonb_build_object('km', coalesce(sum(km + indoor_km), 0), 'indoor_km', coalesce(sum(indoor_km), 0), 'new_cells', coalesce(sum(new_cells), 0), 'steals', coalesce(sum(steals), 0), 'steps', coalesce(sum(steps), 0), 'kcal', coalesce(sum(kcal), 0))
               from public.workouts where user_id = uid and day = d),
