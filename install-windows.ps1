@@ -78,6 +78,14 @@ if ($env:MAYDAN_GOOGLE_CLIENT_ID) {
   Set-Content -Path $EnvFile -Value ($kept + "GOOGLE_CLIENT_IDS=$gid") -Encoding ASCII
   Info "Google sign-in switched on"
 }
+# optional: contact email shown on the privacy and account deletion pages.  $env:MAYDAN_CONTACT_EMAIL='you@example.com'
+if ($env:MAYDAN_CONTACT_EMAIL) {
+  $ce = $env:MAYDAN_CONTACT_EMAIL.Trim()
+  if ($ce -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { Fail "That email does not look right: $ce" }
+  $kept = @(Get-Content $EnvFile | Where-Object { $_ -notmatch '^\s*CONTACT_EMAIL\s*=' })
+  Set-Content -Path $EnvFile -Value ($kept + "CONTACT_EMAIL=$ce") -Encoding ASCII
+  Info "contact email saved"
+}
 $E = ReadEnv
 
 Step '3/8 Downloading the server code'

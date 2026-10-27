@@ -135,14 +135,14 @@ const RPC = {
 };
 
 /* ---------- privacy policy: https://<server>/privacy (Google Play and Health Connect link here) ---------- */
-let privacyHtml = null;
-function privacyPage(res) {
-  if (!privacyHtml) {
-    const c = process.env.CONTACT_EMAIL ? '<a href="mailto:' + process.env.CONTACT_EMAIL + '">' + process.env.CONTACT_EMAIL + '</a>' : 'من داخل التطبيق: حسابي';
-    privacyHtml = require('fs').readFileSync(require('path').join(__dirname, 'privacy.html'), 'utf8').split('__CONTACT__').join(c);
+const pages = {};
+function staticPage(res, file) {
+  if (!pages[file]) {
+    const c = process.env.CONTACT_EMAIL ? '<a href="mailto:' + esc(process.env.CONTACT_EMAIL) + '">' + esc(process.env.CONTACT_EMAIL) + '</a>' : 'من داخل التطبيق: حسابي';
+    pages[file] = require('fs').readFileSync(require('path').join(__dirname, file), 'utf8').split('__CONTACT__').join(c);
   }
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
-  res.end(privacyHtml);
+  res.end(pages[file]);
 }
 
 /* ---------- invite landing page: https://<server>/i/CODE ---------- */
@@ -180,7 +180,8 @@ const server = http.createServer(async (req, res) => {
   try {
     if (path === '/health') { await pool.query('select 1'); return send(res, 200, { ok: true }); }
     if (req.method === 'GET' && /^\/i\/[A-Za-z0-9]{4,12}$/.test(path)) return invitePage(res, path.slice(3).toUpperCase());
-    if (req.method === 'GET' && (path === '/privacy' || path === '/privacy/')) return privacyPage(res);
+    if (req.method === 'GET' && (path === '/privacy' || path === '/privacy/')) return staticPage(res, 'privacy.html');
+    if (req.method === 'GET' && (path === '/delete-account' || path === '/delete-account/')) return staticPage(res, 'delete-account.html');
 
     /* accounts */
     if (path.startsWith('/auth/')) {
