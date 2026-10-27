@@ -233,7 +233,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { data: fn.none ? null : fn.one ? rows[0].v : rows });
     }
     if (path === '/workouts' && req.method === 'GET') {
-      const rows = await asUser(uid, 'select client_id, started_at, mode, km::float8 as km, secs, pts, new_cells, steals, steps, kcal from public.workouts order by started_at desc limit 20', []);
+      const rows = await asUser(uid, 'select client_id, started_at, mode, (km + indoor_km)::float8 as km, indoor_km::float8 as indoor_km, secs, pts, new_cells, steals, steps, kcal from public.workouts order by started_at desc limit 20', []);
       return send(res, 200, { data: rows });
     }
     if (path === '/profile' && req.method === 'PATCH') {

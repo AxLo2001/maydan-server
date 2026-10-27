@@ -24,14 +24,14 @@ $$;
 create or replace function public.challenge_progress(uid uuid, d date, kind text) returns numeric
 language sql stable set search_path = '' as $$
   select coalesce(case kind
-    when 'km'       then sum(km)
+    when 'km'       then sum(km + indoor_km)
     when 'steps'    then sum(steps)
     -- only moving minutes count: at most 20 minutes for each kilometre (a slow 3 km/h walk), so standing still earns nothing
-    when 'minutes'  then floor(sum(least(secs / 60.0, km * 20)))
+    when 'minutes'  then floor(sum(least(secs / 60.0, (km + indoor_km) * 20)))
     when 'cells'    then sum(new_cells)
     when 'steals'   then sum(steals)
-    when 'run_km'   then sum(km) filter (where mode = 'run')
-    when 'early_km' then sum(km) filter (where extract(hour from started_at at time zone 'Asia/Riyadh') < 9)
+    when 'run_km'   then sum(km + indoor_km) filter (where mode = 'run')
+    when 'early_km' then sum(km + indoor_km) filter (where extract(hour from started_at at time zone 'Asia/Riyadh') < 9)
   end, 0)
   from public.workouts where user_id = uid and day = d
 $$;
@@ -70,7 +70,7 @@ declare
   t_km numeric; t_new integer; t_steal integer; amt integer; ok boolean; c jsonb; st jsonb;
 begin
   if uid is null then raise exception 'not signed in'; end if;
-  select coalesce(sum(km), 0), coalesce(sum(new_cells), 0), coalesce(sum(steals), 0)
+  select coalesce(sum(km + indoor_km), 0), coalesce(sum(new_cells), 0), coalesce(sum(steals), 0)
     into t_km, t_new, t_steal from public.workouts where user_id = uid and day = d;
   if p_id = 'km' then ok := t_km >= 2; amt := 40;
   elsif p_id = 'cells' then ok := t_new >= 5; amt := 30;

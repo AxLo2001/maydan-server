@@ -3,6 +3,22 @@
 -- ============ steps and calories per workout ============
 alter table public.workouts add column if not exists steps integer not null default 0;
 alter table public.workouts add column if not exists kcal integer not null default 0;
+-- distance measured from steps while the GPS cannot see the sky (inside a house, mall or gym)
+alter table public.workouts add column if not exists indoor_km numeric(7,3) not null default 0;
+
+-- streak counts GPS and indoor distance together
+create or replace function public.streak_for(uid uuid) returns integer
+language plpgsql stable set search_path = '' as $$
+declare d date := public.riyadh_today(); n integer := 0;
+begin
+  if not exists (select 1 from public.workouts where user_id = uid and day = d group by day having sum(km + indoor_km) >= 0.5) then
+    d := d - 1;
+  end if;
+  while exists (select 1 from public.workouts where user_id = uid and day = d group by day having sum(km + indoor_km) >= 0.5) loop
+    n := n + 1; d := d - 1;
+  end loop;
+  return n;
+end $$;
 
 -- ============ invite codes ============
 alter table public.profiles add column if not exists invite_code text;
@@ -59,6 +75,8 @@ declare
   v_start timestamptz := coalesce((p->>'started_at')::timestamptz, now());
   v_steps integer := greatest(0, coalesce((p->>'steps')::numeric, 0)::integer);
   v_kcal integer := greatest(0, coalesce((p->>'kcal')::numeric, 0)::integer);
+  v_indoor numeric := greatest(0, least(50, coalesce((p->>'indoor_km')::numeric, 0)));
+  v_indoor_pts integer := 0;
   v_streak integer; v_mult numeric; v_base integer; v_pts integer;
   v_new integer := 0; v_steal integer := 0; v_max_cells integer;
   v_victims jsonb := '{}'::jsonb; v_key text; v_inviter uuid; v_bonus integer := 0;
@@ -75,8 +93,15 @@ begin
   if v_secs > 0 and v_km * 1000 / v_secs > 7 then v_km := round(v_secs * 7 / 1000.0, 3); end if;
   if v_secs = 0 then v_km := 0; end if;
   v_steps := least(v_steps, v_secs * 4);                      -- nobody takes more than 4 steps a second
-  v_steps := least(v_steps, ceil(v_km * 2000)::integer + 300); -- and steps must match the GPS distance (shaking the phone does not count)
-  v_kcal := least(v_kcal, ceil(v_km * 200)::integer, 5000);
+  -- indoor distance must be backed by steps (at most 1.1 m a step), by time (walking 2.2 m/s, running 3.5 m/s),
+  -- stay under the overall speed limit, and adds up to at most 5 km a day
+  v_indoor := least(v_indoor, v_steps * 0.0011, v_secs * (case when v_mode = 'run' then 3.5 else 2.2 end) / 1000.0,
+                    greatest(0, v_secs * 7 / 1000.0 - v_km),
+                    greatest(0, 5 - (select coalesce(sum(indoor_km), 0) from public.workouts
+                                     where user_id = uid and day = (v_start at time zone 'Asia/Riyadh')::date)));
+  v_indoor := round(v_indoor, 3);
+  v_steps := least(v_steps, ceil((v_km + v_indoor) * 2000)::integer + 300); -- steps must match the distance (shaking the phone does not count)
+  v_kcal := least(v_kcal, ceil((v_km + v_indoor) * 200)::integer, 5000);
 
   v_streak := public.streak_for(uid);
   v_mult := 1 + least(v_streak, 10) * 0.05;
@@ -96,10 +121,11 @@ begin
     end if;
   end loop;
 
-  v_pts := v_base + v_new * 5 + v_steal * 8;
+  v_indoor_pts := round(v_indoor * 5 * v_mult);                -- indoor distance earns half the walking rate
+  v_pts := v_base + v_indoor_pts + v_new * 5 + v_steal * 8;
 
-  insert into public.workouts (user_id, client_id, started_at, day, mode, km, secs, pts, new_cells, steals, steps, kcal)
-  values (uid, v_client, v_start, (v_start at time zone 'Asia/Riyadh')::date, v_mode, v_km, v_secs, v_pts, v_new, v_steal, v_steps, v_kcal);
+  insert into public.workouts (user_id, client_id, started_at, day, mode, km, secs, pts, new_cells, steals, steps, kcal, indoor_km)
+  values (uid, v_client, v_start, (v_start at time zone 'Asia/Riyadh')::date, v_mode, v_km, v_secs, v_pts, v_new, v_steal, v_steps, v_kcal, v_indoor);
   if v_pts > 0 then
     insert into public.points (user_id, amount, reason) values (uid, v_pts, 'workout:' || v_client);
   end if;
@@ -110,7 +136,7 @@ begin
 
   -- invite reward: once the invited player has walked or run 1 km in total, both get 100 points
   select invited_by into v_inviter from public.profiles where id = uid and not invite_rewarded and invited_by is not null;
-  if v_inviter is not null and (select coalesce(sum(km), 0) from public.workouts where user_id = uid) >= 1 then
+  if v_inviter is not null and (select coalesce(sum(km + indoor_km), 0) from public.workouts where user_id = uid) >= 1 then
     update public.profiles set invite_rewarded = true where id = uid;
     insert into public.points (user_id, amount, reason) values (uid, 100, 'invited:' || uid) on conflict do nothing;
     insert into public.points (user_id, amount, reason) values (v_inviter, 100, 'invite:' || uid) on conflict do nothing;
@@ -118,7 +144,7 @@ begin
     v_bonus := 100;
   end if;
 
-  return jsonb_build_object('pts', v_pts, 'base', v_base, 'new_cells', v_new, 'steals', v_steal, 'mult', v_mult, 'km', v_km, 'invite_bonus', v_bonus);
+  return jsonb_build_object('pts', v_pts, 'base', v_base, 'new_cells', v_new, 'steals', v_steal, 'mult', v_mult, 'km', v_km, 'indoor_km', v_indoor, 'invite_bonus', v_bonus);
 end $$;
 
 -- ============ use an invite code (after signing up) ============
@@ -153,7 +179,7 @@ end $$;
 -- ============ my_stats with everything the badges need ============
 create or replace function public.best_streak_for(uid uuid) returns integer
 language sql stable set search_path = '' as $$
-  with d as (select day from public.workouts where user_id = uid group by day having sum(km) >= 0.5),
+  with d as (select day from public.workouts where user_id = uid group by day having sum(km + indoor_km) >= 0.5),
        g as (select day, day - (row_number() over (order by day))::int as grp from d)
   select coalesce(max(n), 0)::int from (select count(*) as n from g group by grp) x
 $$;
@@ -168,17 +194,17 @@ begin
     'name', (select name from public.profiles where id = uid),
     'challenge', case when to_regprocedure('public.challenge_state(uuid)') is not null then public.challenge_state(uid) end,
     'invite_code', (select invite_code from public.profiles where id = uid),
-    'today', (select jsonb_build_object('km', coalesce(sum(km), 0), 'new_cells', coalesce(sum(new_cells), 0), 'steals', coalesce(sum(steals), 0), 'steps', coalesce(sum(steps), 0), 'kcal', coalesce(sum(kcal), 0))
+    'today', (select jsonb_build_object('km', coalesce(sum(km + indoor_km), 0), 'indoor_km', coalesce(sum(indoor_km), 0), 'new_cells', coalesce(sum(new_cells), 0), 'steals', coalesce(sum(steals), 0), 'steps', coalesce(sum(steps), 0), 'kcal', coalesce(sum(kcal), 0))
               from public.workouts where user_id = uid and day = d),
     'today_pts', (select coalesce(sum(amount), 0) from public.points where user_id = uid and (created_at at time zone 'Asia/Riyadh')::date = d),
     'week_pts', (select coalesce(sum(amount), 0) from public.points where user_id = uid and created_at >= public.week_start()),
     'streak', public.streak_for(uid),
     'best_streak', public.best_streak_for(uid),
-    'total_km', (select coalesce(sum(km), 0) from public.workouts where user_id = uid),
+    'total_km', (select coalesce(sum(km + indoor_km), 0) from public.workouts where user_id = uid),
     'total_steps', (select coalesce(sum(steps), 0) from public.workouts where user_id = uid),
     'total_kcal', (select coalesce(sum(kcal), 0) from public.workouts where user_id = uid),
     'most_steps', (select coalesce(max(steps), 0) from public.workouts where user_id = uid),
-    'longest_km', (select coalesce(max(km), 0) from public.workouts where user_id = uid),
+    'longest_km', (select coalesce(max(km + indoor_km), 0) from public.workouts where user_id = uid),
     'workouts', (select count(*) from public.workouts where user_id = uid),
     'runs', (select count(*) from public.workouts where user_id = uid and mode = 'run'),
     'early', (select count(*) from public.workouts where user_id = uid and extract(hour from started_at at time zone 'Asia/Riyadh') < 7),
@@ -190,9 +216,9 @@ begin
                 where user_id = uid and reason like '%:' || d::text and reason not like 'workout:%'),
     'week_ends', public.week_start() + interval '7 days',
     'week_days', (select jsonb_agg(jsonb_build_object('d', g::date, 'km', coalesce(
-                    (select sum(km) from public.workouts where user_id = uid and day = g::date), 0)) order by g)
+                    (select sum(km + indoor_km) from public.workouts where user_id = uid and day = g::date), 0)) order by g)
                   from generate_series(ws, ws + 6, interval '1 day') g),
-    'week_km', (select coalesce(sum(km), 0) from public.workouts where user_id = uid and day >= ws)
+    'week_km', (select coalesce(sum(km + indoor_km), 0) from public.workouts where user_id = uid and day >= ws)
   ) into r;
   return r;
 end $$;
